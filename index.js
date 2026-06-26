@@ -74,6 +74,9 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
     const metrics = {
       hunkCount: 0,
       changedLines: 0,
+      // deletionWeight: counts deletions twice — losing lines is more alarming
+      // to a reviewer than gaining them, so this tracks psychological cost better.
+      deletionWeight: 0,
       realInsertions: 0,
       realDeletions: 0,
       movedBlocks: 0,
@@ -209,13 +212,18 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
   );
 
   // ── Metrics object ─────────────────────────────────────────────────────────
+  const realIns = totalInsertions - movedDestLines;
+  const realDel = totalDeletions  - movedSourceLines;
   const metrics = {
     // Primary scalar the agent should minimise:
     hunkCount:       merged.length,
     changedLines,                        // real changes only, moves excluded
+    // deletionWeight: counts deletions twice — losing lines is more alarming
+    // to a reviewer than gaining them, so this tracks psychological cost better.
+    deletionWeight:  realDel * 2 + realIns,
     // Breakdown:
-    realInsertions:  totalInsertions - movedDestLines,
-    realDeletions:   totalDeletions  - movedSourceLines,
+    realInsertions:  realIns,
+    realDeletions:   realDel,
     movedBlocks:     moves.length,
     movedLines:      movedSourceLines,   // lines involved in moves
     hitTimeout:      Boolean(hitTimeout),
@@ -254,8 +262,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: true,
               description:
                 "If true, leading/trailing whitespace differences on each line are ignored. " +
-                "Defaults to true — matching VS Code's diff editor default so the agent's " +
-                "view aligns with what the user sees.",
+                "Defaults to true — matching VS Code's diff editor default. " +
+                "Gotcha: a line whose only change is indentation depth (e.g. code moved " +
+                "into a deeper block) will appear as unchanged context with this flag on, " +
+                "making the diff look cleaner than a plain `git diff` would. " +
+                "Set to false if indentation changes should be visible.",
             },
             includeMetrics: {
               type: "boolean",
@@ -272,6 +283,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "If true, the metrics block also includes a per-hunk breakdown " +
                 "(origRange, modRange, insertions, deletions for each hunk). " +
                 "Defaults to false. Only meaningful when includeMetrics is true.",
+            },
+            metricsOnly: {
+              type: "boolean",
+              default: false,
+              description:
+                "If true, suppresses the diff text and returns only the metrics block. " +
+                "Useful for large files (>~200 lines) where the full unified diff would " +
+                "flood the context window. includeMetrics is implicitly true when this is set.",
             },
           },
           required: ["originalText", "modifiedText"],
@@ -303,6 +322,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ignoreTrimWhitespace = true,
       includeMetrics = true,
       verboseMetrics = false,
+      // metricsOnly: skip the diff text entirely; handy for large files.
+      metricsOnly = false,
     } = request.params.arguments ?? {};
 
     if (typeof originalText !== "string" || typeof modifiedText !== "string") {
@@ -333,9 +354,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       Boolean(verboseMetrics)
     );
 
-    const content = [{ type: "text", text }];
+    const content = [];
 
-    if (includeMetrics) {
+    if (!metricsOnly) {
+      content.push({ type: "text", text });
+    }
+
+    if (metricsOnly || includeMetrics) {
       content.push({
         type: "text",
         text: "```json\n" + JSON.stringify(metrics, null, 2) + "\n```",

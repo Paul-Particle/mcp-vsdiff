@@ -36,6 +36,22 @@ The server communicates over stdio and is compatible with any MCP client.
 | `ignoreTrimWhitespace` | boolean | | Ignore leading/trailing whitespace differences per line (default: `true`) |
 | `includeMetrics` | boolean | | Append a JSON metrics block to the response (default: `true`) |
 | `verboseMetrics` | boolean | | Add per-hunk breakdown to the metrics block (default: `false`) |
+| `metricsOnly` | boolean | | Return only the metrics block, no diff text — useful for large files (default: `false`) |
+
+### Metrics fields
+
+| Field | Description |
+|---|---|
+| `hunkCount` | Number of separate change regions (lower = easier to review) |
+| `changedLines` | Real insertions + real deletions, excluding moved lines |
+| `deletionWeight` | `realDeletions × 2 + realInsertions` — weights deletions more heavily, since a reviewer seeing their code disappear is more alarming than seeing new lines appear |
+| `realInsertions` | Lines added, excluding moved lines |
+| `realDeletions` | Lines removed, excluding moved lines |
+| `movedBlocks` | Number of detected move operations |
+| `movedLines` | Total lines involved in moves |
+| `hitTimeout` | Whether the diff computation hit the 5 s time limit |
+
+> **`ignoreTrimWhitespace` gotcha:** with the default `true`, a line whose only change is indentation (e.g. code moved into a deeper `if` block) will appear as **unchanged context**, making the diff look cleaner than a plain `git diff` would. Set to `false` if indentation changes need to be visible.
 
 ### MCP config example
 
