@@ -33,7 +33,7 @@ const CONTEXT_LINES = 3;
  *
  * @returns {{ text: string, metrics: object }}
  */
-function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false) {
+function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false, maxDiffLines = 500) {
   const { changes, moves, hitTimeout } = result;
 
   // ── Move maps ──────────────────────────────────────────────────────────────
@@ -199,14 +199,21 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
   }
 
   // ── Summary footer ─────────────────────────────────────────────────────────
-  lines.push(
+  const summaryLine =
     `--- Summary: ${merged.length} hunk(s), ` +
     `+${totalInsertions - movedDestLines} real insertion(s), ` +
     `-${totalDeletions - movedSourceLines} real deletion(s)` +
     (moves.length > 0
       ? `, ${moves.length} moved block(s) (shown separately above)`
-      : "")
-  );
+      : "");
+
+  if (maxDiffLines > 0 && lines.length > maxDiffLines) {
+    lines.length = maxDiffLines;
+    lines.push("");
+    lines.push(`... [Diff truncated to ${maxDiffLines} lines to save context window. Use metricsOnly or increase maxDiffLines.] ...`);
+  }
+  
+  lines.push(summaryLine);
 
   // ── Metrics object ─────────────────────────────────────────────────────────
   const realIns = totalInsertions - movedDestLines;
@@ -286,6 +293,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "Useful for large files (>~200 lines) where the full unified diff would " +
                 "flood the context window. includeMetrics is implicitly true when this is set.",
             },
+            maxDiffLines: {
+              type: "number",
+              default: 500,
+              description:
+                "Maximum number of lines of diff text to return. If the diff exceeds this, it " +
+                "will be truncated and a warning added. Set to 0 to disable truncation.",
+            },
           },
           required: ["originalText", "modifiedText"],
         },
@@ -318,6 +332,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       verboseMetrics = false,
       // metricsOnly: skip the diff text entirely; handy for large files.
       metricsOnly = false,
+      maxDiffLines = 500,
     } = request.params.arguments ?? {};
 
     if (typeof originalText !== "string" || typeof modifiedText !== "string") {
@@ -345,7 +360,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       originalLines,
       modifiedLines,
       result,
-      Boolean(verboseMetrics)
+      Boolean(verboseMetrics),
+      Number(maxDiffLines)
     );
 
     const content = [];

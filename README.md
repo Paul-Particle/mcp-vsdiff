@@ -37,6 +37,7 @@ The server communicates over stdio and is compatible with any MCP client.
 | `includeMetrics` | boolean | | Append a JSON metrics block to the response (default: `true`) |
 | `verboseMetrics` | boolean | | Add per-hunk breakdown to the metrics block (default: `false`) |
 | `metricsOnly` | boolean | | Return only the metrics block, no diff text — useful for large files (default: `false`) |
+| `maxDiffLines` | number | | Truncate the diff text if it exceeds this number of lines (default: `500`). Set to `0` to disable. |
 
 ### Metrics fields
 
