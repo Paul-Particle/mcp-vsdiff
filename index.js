@@ -25,17 +25,26 @@ const diffComputer = new DefaultLinesDiffComputer();
 const CONTEXT_LINES = 3;
 
 /**
- * Builds a unified-diff-style string from the vscode-diff result.
- * Each hunk shows a few lines of context around each change.
- * Moved blocks are annotated with a comment header.
+ * Builds a unified-diff-style string from the vscode-diff result, and returns
+ * structured metrics alongside it.
+ *
+ * Metrics exclude moved blocks from changedLines so the agent's cost model
+ * matches what VS Code actually highlights as "real" changes.
+ *
+ * @returns {{ text: string, metrics: object }}
  */
-function formatDiff(originalLines, modifiedLines, result) {
+function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false) {
   const { changes, moves, hitTimeout } = result;
 
-  // Build a set of original line numbers that are part of a "move source",
-  // keyed by a move index so we can annotate them.
-  const moveSourceMap = new Map(); // origLineIdx (0-based) -> moveIndex
-  const moveDestMap = new Map();   // modLineIdx  (0-based) -> moveIndex
+  // ── Move maps ──────────────────────────────────────────────────────────────
+  // origLineIdx (0-based) -> moveIndex
+  const moveSourceMap = new Map();
+  // modLineIdx  (0-based) -> moveIndex
+  const moveDestMap = new Map();
+
+  let movedSourceLines = 0;
+  let movedDestLines = 0;
+
   moves.forEach((move, i) => {
     const { original, modified } = move.lineRangeMapping;
     for (let l = original.startLineNumber; l < original.endLineNumberExclusive; l++) {
@@ -44,12 +53,37 @@ function formatDiff(originalLines, modifiedLines, result) {
     for (let l = modified.startLineNumber; l < modified.endLineNumberExclusive; l++) {
       moveDestMap.set(l - 1, i);
     }
+    movedSourceLines += original.endLineNumberExclusive - original.startLineNumber;
+    movedDestLines += modified.endLineNumberExclusive - modified.startLineNumber;
   });
 
+  // ── Aggregate line counts ──────────────────────────────────────────────────
+  const totalDeletions = changes.reduce(
+    (s, c) => s + (c.original.endLineNumberExclusive - c.original.startLineNumber), 0
+  );
+  const totalInsertions = changes.reduce(
+    (s, c) => s + (c.modified.endLineNumberExclusive - c.modified.startLineNumber), 0
+  );
+  // VS Code shows moved blocks with a distinct visual (not as red/green lines),
+  // so we exclude them from the "real" changed-line count.
+  const changedLines =
+    (totalDeletions - movedSourceLines) + (totalInsertions - movedDestLines);
+
+  // ── Early-exit for identical files ────────────────────────────────────────
   if (changes.length === 0 && moves.length === 0) {
-    return hitTimeout
+    const metrics = {
+      hunkCount: 0,
+      changedLines: 0,
+      realInsertions: 0,
+      realDeletions: 0,
+      movedBlocks: 0,
+      movedLines: 0,
+      hitTimeout: Boolean(hitTimeout),
+    };
+    const text = hitTimeout
       ? "⚠️  Diff timed out — files may be identical or too large to compare fully."
       : "Files are identical.";
+    return { text, metrics };
   }
 
   const lines = [];
@@ -58,48 +92,51 @@ function formatDiff(originalLines, modifiedLines, result) {
     lines.push("⚠️  Warning: diff computation timed out; result may be approximate.\n");
   }
 
-  // Collect hunk regions: [origStart, origEnd, modStart, modEnd] (inclusive, 0-based)
-  const hunks = changes.map((change) => {
-    const origStart = change.original.startLineNumber - 1;
-    const origEnd = change.original.endLineNumberExclusive - 1;   // exclusive
-    const modStart = change.modified.startLineNumber - 1;
-    const modEnd = change.modified.endLineNumberExclusive - 1;    // exclusive
-    return { origStart, origEnd, modStart, modEnd };
-  });
+  // ── Hunk collection ────────────────────────────────────────────────────────
+  const hunks = changes.map((change) => ({
+    origStart: change.original.startLineNumber - 1,
+    origEnd:   change.original.endLineNumberExclusive - 1,
+    modStart:  change.modified.startLineNumber - 1,
+    modEnd:    change.modified.endLineNumberExclusive - 1,
+  }));
 
-  // Expand hunks with context and merge overlapping ones
+  // Expand hunks with context and merge overlapping ones.
+  // FIX: check overlap on BOTH original and modified sides — a large insertion
+  // can create modified-side overlap that the original side doesn't reveal.
   const merged = [];
   for (const h of hunks) {
     const ctxOrigStart = Math.max(0, h.origStart - CONTEXT_LINES);
-    const ctxOrigEnd = Math.min(originalLines.length, h.origEnd + CONTEXT_LINES);
-    const ctxModStart = Math.max(0, h.modStart - CONTEXT_LINES);
-    const ctxModEnd = Math.min(modifiedLines.length, h.modEnd + CONTEXT_LINES);
+    const ctxOrigEnd   = Math.min(originalLines.length, h.origEnd + CONTEXT_LINES);
+    const ctxModStart  = Math.max(0, h.modStart - CONTEXT_LINES);
+    const ctxModEnd    = Math.min(modifiedLines.length, h.modEnd + CONTEXT_LINES);
 
+    const prev = merged[merged.length - 1];
     if (
-      merged.length > 0 &&
-      ctxOrigStart <= merged[merged.length - 1].ctxOrigEnd
+      prev &&
+      (ctxOrigStart <= prev.ctxOrigEnd || ctxModStart <= prev.ctxModEnd)
     ) {
-      // Merge with previous hunk
-      const prev = merged[merged.length - 1];
-      prev.ctxOrigEnd = ctxOrigEnd;
-      prev.ctxModEnd = ctxModEnd;
+      prev.ctxOrigEnd = Math.max(prev.ctxOrigEnd, ctxOrigEnd);
+      prev.ctxModEnd  = Math.max(prev.ctxModEnd,  ctxModEnd);
       prev.inner.push(h);
     } else {
       merged.push({ ctxOrigStart, ctxOrigEnd, ctxModStart, ctxModEnd, inner: [h] });
     }
   }
 
+  // ── Render hunks ───────────────────────────────────────────────────────────
+  const hunkDetails = [];
+
   for (const region of merged) {
-    // Hunk header (unified diff style)
     const origLen = region.ctxOrigEnd - region.ctxOrigStart;
-    const modLen = region.ctxModEnd - region.ctxModStart;
+    const modLen  = region.ctxModEnd  - region.ctxModStart;
     lines.push(
       `@@ -${region.ctxOrigStart + 1},${origLen} +${region.ctxModStart + 1},${modLen} @@`
     );
 
-    // Walk original context + deletions, then insertions
     let origCursor = region.ctxOrigStart;
-    let modCursor = region.ctxModStart;
+    let modCursor  = region.ctxModStart;
+    let hunkDeletions  = 0;
+    let hunkInsertions = 0;
 
     for (const h of region.inner) {
       // Context before this change
@@ -108,18 +145,20 @@ function formatDiff(originalLines, modifiedLines, result) {
         origCursor++;
         modCursor++;
       }
-      // Deleted lines
+      // Deleted lines (moved lines annotated; not counted as real deletions)
       for (let i = h.origStart; i < h.origEnd; i++) {
         const moveIdx = moveSourceMap.get(i);
         const annotation = moveIdx !== undefined ? ` {moved to block #${moveIdx + 1}}` : "";
         lines.push(`-${originalLines[i]}${annotation}`);
+        if (moveIdx === undefined) hunkDeletions++;
         origCursor++;
       }
-      // Inserted lines
+      // Inserted lines (moved lines annotated; not counted as real insertions)
       for (let i = h.modStart; i < h.modEnd; i++) {
         const moveIdx = moveDestMap.get(i);
         const annotation = moveIdx !== undefined ? ` {moved from block #${moveIdx + 1}}` : "";
         lines.push(`+${modifiedLines[i]}${annotation}`);
+        if (moveIdx === undefined) hunkInsertions++;
         modCursor++;
       }
     }
@@ -132,18 +171,58 @@ function formatDiff(originalLines, modifiedLines, result) {
     }
 
     lines.push(""); // blank line between hunks
+
+    if (verboseMetrics) {
+      hunkDetails.push({
+        origRange:  [region.ctxOrigStart + 1, region.ctxOrigEnd],
+        modRange:   [region.ctxModStart + 1,  region.ctxModEnd],
+        insertions: hunkInsertions,
+        deletions:  hunkDeletions,
+      });
+    }
   }
 
-  // Summary footer
-  const totalDeletions = changes.reduce((s, c) => s + (c.original.endLineNumberExclusive - c.original.startLineNumber), 0);
-  const totalInsertions = changes.reduce((s, c) => s + (c.modified.endLineNumberExclusive - c.modified.startLineNumber), 0);
+  // ── Moved blocks section ───────────────────────────────────────────────────
+  // Rendered separately so the agent (and reader) clearly distinguishes them
+  // from real insertions/deletions — VS Code's diff view treats them differently.
+  if (moves.length > 0) {
+    lines.push("── Moved Blocks (low visual cost in VS Code) ──");
+    moves.forEach((move, i) => {
+      const { original, modified } = move.lineRangeMapping;
+      const srcStart = original.startLineNumber;
+      const srcEnd   = original.endLineNumberExclusive - 1;
+      const dstStart = modified.startLineNumber;
+      const dstEnd   = modified.endLineNumberExclusive - 1;
+      lines.push(`  Block #${i + 1}: orig lines ${srcStart}–${srcEnd} → mod lines ${dstStart}–${dstEnd}`);
+    });
+    lines.push("");
+  }
+
+  // ── Summary footer ─────────────────────────────────────────────────────────
   lines.push(
-    `--- Summary: ${changes.length} changed region(s), ` +
-    `+${totalInsertions} insertion(s), -${totalDeletions} deletion(s)` +
-    (moves.length > 0 ? `, ${moves.length} moved block(s)` : "")
+    `--- Summary: ${merged.length} hunk(s), ` +
+    `+${totalInsertions - movedDestLines} real insertion(s), ` +
+    `-${totalDeletions - movedSourceLines} real deletion(s)` +
+    (moves.length > 0
+      ? `, ${moves.length} moved block(s) (shown separately above)`
+      : "")
   );
 
-  return lines.join("\n");
+  // ── Metrics object ─────────────────────────────────────────────────────────
+  const metrics = {
+    // Primary scalar the agent should minimise:
+    hunkCount:       merged.length,
+    changedLines,                        // real changes only, moves excluded
+    // Breakdown:
+    realInsertions:  totalInsertions - movedDestLines,
+    realDeletions:   totalDeletions  - movedSourceLines,
+    movedBlocks:     moves.length,
+    movedLines:      movedSourceLines,   // lines involved in moves
+    hitTimeout:      Boolean(hitTimeout),
+    ...(verboseMetrics ? { hunks: hunkDetails } : {}),
+  };
+
+  return { text: lines.join("\n"), metrics };
 }
 
 // ─── MCP Handlers ─────────────────────────────────────────────────────────────
@@ -154,8 +233,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "compute_diff",
         description:
-          "Computes a highly accurate diff with move detection using the VS Code advanced diff algorithm. " +
-          "Returns a human-readable unified diff string with context lines, move annotations, and a summary.",
+          "Computes a highly accurate diff using VS Code's advanced diff algorithm. " +
+          "Returns a unified diff string with move annotations plus a structured metrics block. " +
+          "Moved blocks are reported separately from real insertions/deletions because " +
+          "VS Code renders them with a distinct, low-noise visual — the agent should treat " +
+          "hunkCount and changedLines as the primary signals to minimise.",
         inputSchema: {
           type: "object",
           properties: {
@@ -169,8 +251,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             ignoreTrimWhitespace: {
               type: "boolean",
+              default: true,
               description:
-                "If true, leading/trailing whitespace differences on each line are ignored. Defaults to false.",
+                "If true, leading/trailing whitespace differences on each line are ignored. " +
+                "Defaults to true — matching VS Code's diff editor default so the agent's " +
+                "view aligns with what the user sees.",
+            },
+            includeMetrics: {
+              type: "boolean",
+              default: true,
+              description:
+                "If true (default), appends a JSON metrics block after the diff text. " +
+                "Contains hunkCount, changedLines, and related counts the agent can parse " +
+                "directly to compare candidate edits without string-parsing the diff.",
+            },
+            verboseMetrics: {
+              type: "boolean",
+              default: false,
+              description:
+                "If true, the metrics block also includes a per-hunk breakdown " +
+                "(origRange, modRange, insertions, deletions for each hunk). " +
+                "Defaults to false. Only meaningful when includeMetrics is true.",
             },
           },
           required: ["originalText", "modifiedText"],
@@ -193,40 +294,66 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
-  const { originalText, modifiedText, ignoreTrimWhitespace = false } =
-    request.params.arguments;
+  try {
+    const {
+      originalText,
+      modifiedText,
+      // Default true: matches VS Code editor's ignoreTrimWhitespace default so
+      // whitespace-only differences are invisible to the user and not flagged here.
+      ignoreTrimWhitespace = true,
+      includeMetrics = true,
+      verboseMetrics = false,
+    } = request.params.arguments ?? {};
 
-  if (typeof originalText !== "string" || typeof modifiedText !== "string") {
+    if (typeof originalText !== "string" || typeof modifiedText !== "string") {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "originalText and modifiedText must be strings.",
+          },
+        ],
+      };
+    }
+
+    const originalLines = originalText.split(/\r?\n/);
+    const modifiedLines = modifiedText.split(/\r?\n/);
+
+    const result = diffComputer.computeDiff(originalLines, modifiedLines, {
+      ignoreTrimWhitespace: Boolean(ignoreTrimWhitespace),
+      computeMoves: true,
+      maxComputationTimeMs: 5000,
+    });
+
+    const { text, metrics } = formatDiff(
+      originalLines,
+      modifiedLines,
+      result,
+      Boolean(verboseMetrics)
+    );
+
+    const content = [{ type: "text", text }];
+
+    if (includeMetrics) {
+      content.push({
+        type: "text",
+        text: "```json\n" + JSON.stringify(metrics, null, 2) + "\n```",
+      });
+    }
+
+    return { content };
+  } catch (err) {
     return {
       isError: true,
       content: [
         {
           type: "text",
-          text: "originalText and modifiedText must be strings.",
+          text: `Internal error: ${err instanceof Error ? err.message : String(err)}`,
         },
       ],
     };
   }
-
-  const originalLines = originalText.split(/\r?\n/);
-  const modifiedLines = modifiedText.split(/\r?\n/);
-
-  const result = diffComputer.computeDiff(originalLines, modifiedLines, {
-    ignoreTrimWhitespace: Boolean(ignoreTrimWhitespace),
-    computeMoves: true,
-    maxComputationTimeMs: 5000,
-  });
-
-  const text = formatDiff(originalLines, modifiedLines, result);
-
-  return {
-    content: [
-      {
-        type: "text",
-        text,
-      },
-    ],
-  };
 });
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────

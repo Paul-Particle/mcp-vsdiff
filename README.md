@@ -33,7 +33,9 @@ The server communicates over stdio and is compatible with any MCP client.
 |---|---|---|---|
 | `originalText` | string | ✅ | The original text |
 | `modifiedText` | string | ✅ | The modified text |
-| `ignoreTrimWhitespace` | boolean | | Ignore leading/trailing whitespace differences (default: `false`) |
+| `ignoreTrimWhitespace` | boolean | | Ignore leading/trailing whitespace differences per line (default: `true`) |
+| `includeMetrics` | boolean | | Append a JSON metrics block to the response (default: `true`) |
+| `verboseMetrics` | boolean | | Add per-hunk breakdown to the metrics block (default: `false`) |
 
 ### MCP config example
 
