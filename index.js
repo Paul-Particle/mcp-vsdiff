@@ -33,7 +33,7 @@ const CONTEXT_LINES = 3;
  *
  * @returns {{ text: string, metrics: object }}
  */
-function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false, maxDiffLines = 500) {
+function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false, maxDiffLines = 500, skipDiffLines = 0) {
   const { changes, moves, hitTimeout } = result;
 
   // ── Move maps ──────────────────────────────────────────────────────────────
@@ -207,13 +207,28 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
       ? `, ${moves.length} moved block(s) (shown separately above)`
       : "");
 
-  if (maxDiffLines > 0 && lines.length > maxDiffLines) {
-    lines.length = maxDiffLines;
-    lines.push("");
-    lines.push(`... [Diff truncated to ${maxDiffLines} lines to save context window. Use metricsOnly or increase maxDiffLines.] ...`);
+  let finalLines = lines;
+  const totalLines = lines.length;
+
+  if (skipDiffLines > 0 || (maxDiffLines > 0 && totalLines > skipDiffLines + maxDiffLines)) {
+    const start = Math.min(skipDiffLines, totalLines);
+    const end = maxDiffLines > 0 ? Math.min(start + maxDiffLines, totalLines) : totalLines;
+    
+    finalLines = lines.slice(start, end);
+
+    if (start > 0) {
+      finalLines.unshift("");
+      finalLines.unshift(`... [Skipped first ${start} lines of diff] ...`);
+    }
+
+    if (end < totalLines) {
+      finalLines.push("");
+      finalLines.push(`... [Diff truncated at line ${end} of ${totalLines}. Use skipDiffLines=${end} to see the next part.] ...`);
+    }
   }
   
-  lines.push(summaryLine);
+  finalLines.push("");
+  finalLines.push(summaryLine);
 
   // ── Metrics object ─────────────────────────────────────────────────────────
   const realIns = totalInsertions - movedDestLines;
@@ -231,7 +246,7 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
     ...(verboseMetrics ? { hunks: hunkDetails } : {}),
   };
 
-  return { text: lines.join("\n"), metrics };
+  return { text: finalLines.join("\n"), metrics };
 }
 
 // ─── MCP Handlers ─────────────────────────────────────────────────────────────
@@ -300,6 +315,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "Maximum number of lines of diff text to return. If the diff exceeds this, it " +
                 "will be truncated and a warning added. Set to 0 to disable truncation.",
             },
+            skipDiffLines: {
+              type: "number",
+              default: 0,
+              description:
+                "Number of diff lines to skip from the beginning. Combine with maxDiffLines " +
+                "to paginate through very large diffs.",
+            },
           },
           required: ["originalText", "modifiedText"],
         },
@@ -333,6 +355,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // metricsOnly: skip the diff text entirely; handy for large files.
       metricsOnly = false,
       maxDiffLines = 500,
+      skipDiffLines = 0,
     } = request.params.arguments ?? {};
 
     if (typeof originalText !== "string" || typeof modifiedText !== "string") {
@@ -361,7 +384,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       modifiedLines,
       result,
       Boolean(verboseMetrics),
-      Number(maxDiffLines)
+      Number(maxDiffLines),
+      Number(skipDiffLines)
     );
 
     const content = [];

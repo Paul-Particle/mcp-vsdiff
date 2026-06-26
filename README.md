@@ -38,6 +38,7 @@ The server communicates over stdio and is compatible with any MCP client.
 | `verboseMetrics` | boolean | | Add per-hunk breakdown to the metrics block (default: `false`) |
 | `metricsOnly` | boolean | | Return only the metrics block, no diff text — useful for large files (default: `false`) |
 | `maxDiffLines` | number | | Truncate the diff text if it exceeds this number of lines (default: `500`). Set to `0` to disable. |
+| `skipDiffLines` | number | | Number of diff text lines to skip from the beginning. Combine with `maxDiffLines` to paginate through very large diffs (default: `0`). |
 
 ### Metrics fields
 
