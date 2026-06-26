@@ -44,7 +44,6 @@ The server communicates over stdio and is compatible with any MCP client.
 |---|---|
 | `hunkCount` | Number of separate change regions (lower = easier to review) |
 | `changedLines` | Real insertions + real deletions, excluding moved lines |
-| `deletionWeight` | `realDeletions × 2 + realInsertions` — weights deletions more heavily, since a reviewer seeing their code disappear is more alarming than seeing new lines appear |
 | `realInsertions` | Lines added, excluding moved lines |
 | `realDeletions` | Lines removed, excluding moved lines |
 | `movedBlocks` | Number of detected move operations |

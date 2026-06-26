@@ -74,9 +74,6 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
     const metrics = {
       hunkCount: 0,
       changedLines: 0,
-      // deletionWeight: counts deletions twice — losing lines is more alarming
-      // to a reviewer than gaining them, so this tracks psychological cost better.
-      deletionWeight: 0,
       realInsertions: 0,
       realDeletions: 0,
       movedBlocks: 0,
@@ -218,9 +215,6 @@ function formatDiff(originalLines, modifiedLines, result, verboseMetrics = false
     // Primary scalar the agent should minimise:
     hunkCount:       merged.length,
     changedLines,                        // real changes only, moves excluded
-    // deletionWeight: counts deletions twice — losing lines is more alarming
-    // to a reviewer than gaining them, so this tracks psychological cost better.
-    deletionWeight:  realDel * 2 + realIns,
     // Breakdown:
     realInsertions:  realIns,
     realDeletions:   realDel,
